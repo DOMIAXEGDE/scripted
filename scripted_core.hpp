@@ -1,7 +1,7 @@
 // scripted_core.hpp
 // Header-only shared backend for scripted CLI & GUI.
 // C++23, no external deps. All I/O under files/ and files/out/.
-
+// --- platform detection (scripted_core.hpp) -------------------------------
 #pragma once
 #include <string>
 #include <string_view>
@@ -12,6 +12,7 @@
 #include <regex>
 #include <filesystem>
 #include <fstream>
+#include <cstdlib>
 #include <sstream>
 #include <algorithm>
 #include <cctype>
@@ -22,6 +23,36 @@ namespace scripted {
 
 namespace fs = std::filesystem;
 using std::string;
+
+#if defined(_WIN32) || defined(_WIN64)
+    inline constexpr bool kWindows = true;
+    inline constexpr bool kLinux   = false;
+    inline const char* platformName() { return "Windows"; }
+#else
+    inline constexpr bool kWindows = false;
+    #if defined(__linux__)
+        inline constexpr bool kLinux = true;
+        inline const char* platformName() { return "Linux"; }
+    #else
+        inline constexpr bool kLinux = false;
+        inline const char* platformName() { return "Unknown"; }
+    #endif
+#endif
+
+// Optional: detect WSL for friendlier messages
+inline bool isWSL() {
+#if defined(__linux__)
+    if (const char* e = std::getenv("WSL_DISTRO_NAME")) return true;
+    std::ifstream f("/proc/version");
+    std::string s( (std::istreambuf_iterator<char>(f)), {} );
+    return s.find("Microsoft") != std::string::npos || s.find("WSL") != std::string::npos;
+#else
+    return false;
+#endif
+}
+
+// Normalize line endings: choose '\n' everywhere (safer across OSes)
+inline constexpr const char* kEOL = "\n";
 
 inline string trim(string s) {
     auto notspace = [](int ch){ return !std::isspace(ch); };
@@ -254,12 +285,41 @@ inline bool loadContextFile(const Config& cfg, const fs::path& file, Bank& bank,
     if (!pr.ok) { err = pr.err; return false; }
     return true;
 }
-inline bool saveContextFile(const Config& cfg, const fs::path& file, const Bank& bank, string& err){
-    std::ofstream out(file, std::ios::binary);
-    if (!out){ err="cannot write: " + file.string(); return false; }
-    out << writeBankText(bank, cfg);
-    return true;
+// --- saveContextFile: ensure dirs; write atomically-ish -------------------
+inline bool saveContextFile(const Config& cfg,
+                            const std::filesystem::path& path,
+                            const Bank& b,
+                            std::string& err)
+{
+    try {
+        std::filesystem::create_directories(path.parent_path());
+
+        // Write to a temp file first
+        auto tmp = path; tmp += ".tmp";
+        {
+            std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+            if (!out) { err = "Cannot open temp file for write: " + tmp.string(); return false; }
+            std::string text = writeBankText(b, cfg);
+            out.write(text.data(), (std::streamsize)text.size());
+            if (!out) { err = "Write failed: " + tmp.string(); return false; }
+        }
+
+        // Replace the target (works across volumes with fallback)
+        std::error_code ec;
+        std::filesystem::rename(tmp, path, ec);
+        if (ec) {
+            std::filesystem::copy_file(tmp, path,
+                std::filesystem::copy_options::overwrite_existing, ec);
+            std::filesystem::remove(tmp);
+            if (ec) { err = "Replace failed: " + path.string() + " (" + ec.message() + ")"; return false; }
+        }
+        return true;
+    } catch (const std::exception& e) {
+        err = e.what();
+        return false;
+    }
 }
+
 
 inline bool ensureBankLoadedInWorkspace(const Config& cfg, Workspace& ws, long long bankId, string& err){
     if (ws.banks.count(bankId)) return true;
@@ -399,26 +459,47 @@ inline void saveConfig(const Paths& P, const Config& cfg){
 }
 
 // ----------------------------- Utility ops used by CLI/GUI -----------------------------
-inline bool openCtx(const Config& cfg, Workspace& ws, const string& ctxName, string& status){
-    string name = ctxName;
-    if (name.size()>4 && name.substr(name.size()-4)==".txt") name = name.substr(0,name.size()-4);
-    if (name.empty()) { status="Bad name"; return false; }
-    string token = (name[0]==cfg.prefix)? name.substr(1) : name;
-    long long bankId;
-    if (!parseIntBase(token, cfg.base, bankId)){ status="Cannot parse bank id"; return false; }
-    fs::path file = contextFileName(cfg, bankId);
-    Bank b; string err;
-    if (fs::exists(file)) {
-        if (!loadContextFile(cfg, file, b, err)){ status="Open failed: "+err; return false; }
-    } else {
-        b.id = bankId; b.title = name + " : NEW"; b.regs[1]={};
-        string e; if (!saveContextFile(cfg, file, b, e)){ status="Create failed: "+e; return false; }
+// --- openCtx: load-or-create without testing writability ------------------
+inline bool openCtx(const Config& cfg,
+                    Workspace& ws,
+                    std::string nameOrStem,
+                    std::string& status)
+{
+    // Normalize stem and compute id
+    std::string stem = nameOrStem;
+    if (stem.size() > 4 && stem.substr(stem.size() - 4) == ".txt")
+        stem.resize(stem.size() - 4);
+
+    std::string token = (!stem.empty() && stem[0] == cfg.prefix) ? stem.substr(1) : stem;
+    long long id = 0;
+    if (!parseIntBase(token, cfg.base, id)) {
+        status = "Bad context id: " + stem;
+        return false;
     }
-    ws.banks[bankId] = std::move(b);
-    ws.filenames[bankId] = file.string();
-    status = "Opened " + file.string();
+
+    auto path = contextFileName(cfg, id);
+    Bank b;
+
+    if (std::filesystem::exists(path)) {
+        // OPEN FOR READING ONLY — opening must NOT fail if file is read-only
+        std::ifstream in(path, std::ios::binary);
+        if (!in) { status = "Cannot open: " + path.string(); return false; }
+        std::string text((std::istreambuf_iterator<char>(in)), {});
+        auto pr = parseBankText(text, cfg, b);
+        if (!pr.ok) { status = "Parse failed: " + pr.err; return false; }
+        if (b.title.empty()) b.title = stem;
+        ws.banks[id] = std::move(b);
+        status = "Opened " + path.string();
+        return true;
+    }
+
+    // New (empty) bank if file doesn't exist
+    b.title = stem;
+    ws.banks[id] = std::move(b);
+    status = "Created new context: " + path.string();
     return true;
 }
+
 
 inline string resolveBankToText(const Config& cfg, Workspace& ws, long long bankId){
     Resolver R(cfg, ws);

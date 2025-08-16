@@ -135,6 +135,7 @@ R"(Commands:
         P.ensure();
         loadConfig();
         std::cout<<"scripted CLI — shared core\nType :help for commands.\n\n";
+		std::cout << "scripted CLI — " << scripted::platformName() << (scripted::isWSL() ? " (WSL)" : "") << "\n";
         string line;
         while (true){
             std::cout<<">> ";

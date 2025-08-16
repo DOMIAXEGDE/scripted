@@ -1,31 +1,47 @@
-// scripted-gui.cpp — Win32 GUI using shared core, UX-enhanced (fixed init order).
+// scripted-gui.cpp — Win32 GUI using shared core.
 // Build (MinGW):
 // g++ -std=c++23 -O2 scripted-gui.cpp -o scripted-gui.exe -municode -lgdi32 -lcomctl32 -lcomdlg32 -lole32 -luuid
 
-#ifndef UNICODE
-#define UNICODE
-#endif
-#ifndef _UNICODE
-#define _UNICODE
-#endif
+#if !defined(_WIN32)
+  #include <cstdio>
+  int main() {
+      std::fprintf(stderr, "scripted-gui is Windows-only. Use scripted (CLI) on Linux.\n");
+      return 1;
+  }
+#else
 
-#include <windows.h>
-#include <commctrl.h>
-#include <commdlg.h>
-#include <shellapi.h>
-#include <uxtheme.h>
-#include <string>
-#include <vector>
-#include <chrono>
-#include <thread>
-#include <optional>
-#include <atomic>
+  #ifndef UNICODE
+  #define UNICODE
+  #endif
+  #ifndef _UNICODE
+  #define _UNICODE
+  #endif
 
-#include "scripted_core.hpp"
+  // --- Windows + std headers (all stay inside the #else) ---
+  #include <windows.h>
+  #include <commctrl.h>
+  #include <commdlg.h>
+  #include <shellapi.h>
+  #include <uxtheme.h>
 
-#pragma comment(lib, "comctl32.lib")
+  #include <string>
+  #include <vector>
+  #include <chrono>
+  #include <thread>
+  #include <optional>
+  #include <atomic>
 
-using namespace scripted;
+  #include "scripted_core.hpp"
+
+  #ifdef _MSC_VER
+  #  pragma comment(lib, "comctl32.lib")
+  #endif
+
+  using namespace scripted;
+
+  // ---- your full Windows implementation here ----
+  // App struct, helpers, WndProc, wWinMain, etc.
+  // (and the openCtxUI()/saveCurrent() replacements from earlier)
 
 // ---------- UTF helpers ----------
 static std::wstring s2ws(const std::string& s){
@@ -365,20 +381,31 @@ struct App {
         return true;
     }
 
-    bool openCtxUI(const std::string& nameOrStem){
-        std::string status;
-        if (!openCtx(cfg, ws, nameOrStem, status)){ setStatus(status); return false; }
-        std::string stem = nameOrStem;
-        if (stem.size()>4 && stem.substr(stem.size()-4)==".txt") stem = stem.substr(0, stem.size()-4);
-        std::string token = (stem[0]==cfg.prefix)? stem.substr(1) : stem;
-        long long id; parseIntBase(token, cfg.base, id);
-        current = id; dirty=false;
-        setStatus(status);
-        refreshBankCombo();
-        rebuildRows();
-        refreshList();
-        return true;
-    }
+	bool openCtxUI(const std::string& nameOrStem){
+		std::string status;
+		if (!::scripted::openCtx(cfg, ws, nameOrStem, status)) {   // read-only tolerant
+			setStatus(status);
+			return false;
+		}
+
+		std::string stem = nameOrStem;
+		if (stem.size() > 4 && stem.ends_with(".txt")) stem.resize(stem.size() - 4);
+		std::string token = (!stem.empty() && stem[0] == cfg.prefix) ? stem.substr(1) : stem;
+
+		long long id = 0;
+		parseIntBase(token, cfg.base, id);
+		current = id;
+		dirty   = false;
+
+		setStatus(status);
+		refreshBankCombo();
+		rebuildRows();
+		applyFilter();
+		refreshList();
+		return true;
+	}
+
+
 
     void rebuildRows(){
         rows.clear();
@@ -434,13 +461,26 @@ struct App {
         }
     }
 
-    void saveCurrent(){
-        if (!current){ setStatus("No current context"); return; }
-        std::string err;
-        if (!saveContextFile(cfg, contextFileName(cfg,*current), ws.banks[*current], err))
-            setStatus("Write failed: "+err);
-        else { dirty=false; setStatus("Saved "+ contextFileName(cfg,*current).string()); }
-    }
+	void saveCurrent(){
+		if (!current) { setStatus("No current context"); return; }
+
+		std::string err;
+		auto path = contextFileName(cfg, *current);
+
+		if (!::scripted::saveContextFile(cfg, path, ws.banks[*current], err)) {
+			if (err.find("denied") != std::string::npos || err.find("permission") != std::string::npos)
+				err += " — check folder permissions or choose a writable location.";
+			setStatus("Save failed: " + err);
+			MessageBoxW(hwnd, s2ws("Save failed:\n" + err).c_str(),
+						L"Save error", MB_OK | MB_ICONERROR);
+			return;
+		}
+
+
+		dirty = false;
+		setStatus("Saved " + path.string());
+	}
+
 
     void selectRowToEditor(){
         int iSel = ListView_GetNextItem(hList, -1, LVNI_SELECTED);
@@ -595,7 +635,7 @@ static void DoOpenDialog(App& app){
     ofn.nFilterIndex = 1;
     ofn.lpstrFile = buf; ofn.nMaxFile = 1024;
     ofn.lpstrInitialDir = s2ws(app.P.root.string()).c_str();
-    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
+	ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY | OFN_NOCHANGEDIR;
     if (GetOpenFileNameW(&ofn)){
         std::wstring ws(buf); std::string path = ws2s(ws);
         fs::path p(path);
@@ -775,3 +815,4 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int){
     }
     return 0;
 }
+#endif // _WIN32
