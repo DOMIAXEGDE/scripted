@@ -1,6 +1,7 @@
 // qt_view.cpp — Qt View implementing IView for the Presenter.
 // Build (Qt6 example):
-//   Linux/macOS:  c++ -std=c++23 qt_view.cpp -o scripted-gui-universal `pkg-config --cflags --libs Qt6Widgets`
+//   Linux/macOS:  c++ -std=c++23 -O2 qt_view.cpp -o scripted-gui `pkg-config --cflags --libs Qt6Widgets`
+//				   ./scripted-gui
 //   or use CMake snippet below.
 //
 // Notes:
@@ -29,6 +30,8 @@
 #include <QtCore/QTimer>
 #include <QtCore/QFileInfo>
 #include <QtCore/QStringList>
+#include <QtGui/QKeyEvent>
+#include <QtCore/QTime>
 
 #include <string>
 #include <vector>
@@ -47,7 +50,7 @@ static QString qFromStd(const std::string& s){ return QString::fromUtf8(s.c_str(
 static std::string qToStd(const QString& s){ QByteArray b = s.toUtf8(); return std::string(b.constData(), (size_t)b.size()); }
 
 class QtView final : public QMainWindow, public IView {
-    Q_OBJECT
+    //Q_OBJECT
 public:
     QtView(QWidget* parent=nullptr)
         : QMainWindow(parent)
@@ -276,6 +279,7 @@ private:
             if (onFilter) onFilter(qToStd(s));
         });
 
+
         connect(btnInsert, &QPushButton::clicked, this, [this]{ insertFromEditors(); });
         connect(btnDelete, &QPushButton::clicked, this, [this]{ deleteSelected(); });
         connect(table, &QTableView::doubleClicked, this, [this](const QModelIndex& idx){
@@ -374,12 +378,14 @@ private:
     // Widgets
     QComboBox* combo{};
     QPushButton *btnSwitch{}, *btnPreload{}, *btnOpen{}, *btnSave{}, *btnResolve{}, *btnExport{};
+    QPushButton *btnInsert{}, *btnDelete{};   // <-- add these two
     QLineEdit *editFilter{}, *editReg{}, *editAddr{};
     QPlainTextEdit* editValue{};
     QTableView* table{};
     QStandardItemModel* model{};
     QProgressBar* progress{};
     QPlainTextEdit* log{};
+
 
     // View state
     std::optional<long long> current;
@@ -400,4 +406,4 @@ int main(int argc, char** argv){
     return app.exec();
 }
 
-#include "qt_view.moc"
+//#include "qt_view.moc"
